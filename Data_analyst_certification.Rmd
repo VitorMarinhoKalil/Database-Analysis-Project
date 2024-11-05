@@ -1,0 +1,682 @@
+---
+title: An R Markdown document converted from "C:\Users\Home\Downloads\notebook.ipynb"
+output: html_document
+---
+
+# Sales Strategy Analysis Report
+
+#### From the requests and database received the following project aims to conduct an analysis of the sales of the new product line from Pens and Printers. The analysis must try to clarify the characteristics and differences of the sales methods and find any other important information for the sales team. The goals of this report are to describe the main characteristics and correlations inside this database and to answer the questions posed by the sales team:
+- How many customers were there for each approach?
+- What does the spread of revenue look like overall? And for each method?
+- Was there any difference in revenue over time for each method?
+- Are there any differences between the customers in each group?
+- Based on the data, what method would be recommended to use considering the effort for each?
+
+#### This project was divided into three different sections:
+1. Data Validation and Cleaning
+2. Exploratory Analysis
+3. Creating a Business Metric
+
+```{r, results="hide"}
+#Packages necessary for this analysis
+#install.packages('e1071')
+#install.packages('randomForest')
+#install.packages('neuralnet')
+library(e1071)
+library(randomForest)
+library(neuralnet)
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(scales)
+
+#For results not to vary because of randomization and the predictions
+set.seed(8)
+```
+
+# 1. Data Validation and Cleaning
+#### In this section the database will be revised to check if the information is making sense for each category, any data that may be incorrect will be corrected in this section as well. This way, the analysis can be conducted properly with correctly adjusted data. Below is the first six rows of the database received without any alterations.
+
+```{r}
+#Loading data and visualizing the data for understanding
+product_sales <- read.csv(choose.files(), stringsAsFactors=T)
+head(product_sales)
+```
+
+```{r}
+#Summary statistics to grasp the characteristics and range of each variable
+summary(product_sales)
+```
+
+### With the summary statistics analyzed, it is noticeable that three variables have inconsistencies that will need some adjusting. 
+- In sales_method, there are two categories that are written incorrectly and that should be grouped into the category that is written with the right label. 
+- The revenue column has 1074 missing values. 
+- The years_as_customer column has a maximum value of 63 which is impossible considering the company was founded in 1984
+
+### Regarding the other variables:
+- For week, the values at min and max make sense considering the database is regarding the sales in the first six weeks. To verify there are no non-integer numbers, the unique function was used and all values for the variable were whole numbers.
+- For customer_id, each row has a different id which makes sense considering the database, variable is valid
+- The nb_sold column contains values that are consistent with amount of products sold, the unique function also verified it has no non-integer values
+- The nb_site_visits variable is also valid considering the amount of times a customer visited the website, unique function verified there are no non-integer values
+- For state, there are no NA values and with the unique function it was possible to verify no mispelling in state names
+
+```{r}
+print('This code output serves for checking if there aren´t any non-integer values for the week, nb_site_visits and nb_sold columns or mispelling in state names, since there aren´t, these columns are validated')
+#Checking if there aren´t any non-integer values
+unique(product_sales$week)
+unique(product_sales$nb_site_visits)
+unique(product_sales$nb_sold)
+
+#Checking any mispelling in state names
+unique(product_sales$state)
+```
+
+## Correcting the variables in need of adjusting
+### Adjusting the years_as_customer column
+Since Pens and Printers was founded in 1984, the max number of years someone can be a customer is 40 years. From the summary we saw the max was 63, which is impossible. To fix this and any other values that may be over the maximum possible, we will make all values over 40 become the maximum value possible (40).
+
+```{r}
+#Adjusting years_as_customer
+product_sales <- product_sales %>%
+	mutate(years_as_customer = if_else(years_as_customer>40, 40,years_as_customer)) %>%
+	arrange(desc(years_as_customer))
+```
+
+### Adjusting the sales_method column
+For sales method it is visible that two groups with very few values were supposed to be from the correctly labeled entries. Here we will make all the 10 "email" values change to the correctly labeled "Email" and all the 23 "em + call" values change to the correctly labeled "Email + Call".
+
+```{r}
+#First, transforming all 'email' to 'Email'
+product_sales <- product_sales %>%
+  mutate(sales_method = as.factor(str_replace(sales_method, 'email', 'Email')))
+
+summary(product_sales)
+```
+
+```{r}
+#Here we will correct 'em + call' to 'Email + Call'
+#(!)For this correction it was necessary to place \\ before the + so the string is properly recognized
+product_sales <- product_sales %>%
+	mutate(sales_method = as.factor(str_replace(sales_method, 'em \\+ call', 'Email \\+ Call')))
+
+summary(product_sales)
+```
+
+### Adjusting the revenue column
+The last visible problem we need to address are all the NA values for revenue. To fix this issue a predictive model will be created and then tested to see if it can accurately predict the missing values.
+
+#### After analyzing several graphs between different variables and revenue, it was identified that sales_method and nb_sold should be able to give the most accurate prediction of revenue as seen in the graph below. The graph will be more deeply analyzed in the exploratory analysis section but we can clearly see a strong trend.
+
+```{r}
+#First we will filter for the data entries with values for revenue
+product_salesComplRev <- product_sales %>%
+  filter((!is.na(revenue)))
+```
+
+```{r}
+#Scatter plot of nb_sold and revenue colored by sales_method
+ggplot(product_salesComplRev, aes(x= nb_sold, y= revenue, color=sales_method)) +
+  geom_point() +
+  geom_jitter(alpha = 0.3) +
+  labs(y= 'Revenue ($)', x= 'Products Sold', title = 'Revenue by Products Sold Colored by Sales Method', color = 'Sales Method') +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+#### To accurately predict the values based on these variables, different models were tested but the best results came from a neural network model. To implement the model, it was necessary to convert categorical variables to numbers and to normalize the numerical variables.
+
+```{r}
+#Converting categorical variable to numerical
+product_salesDBnn <- product_salesComplRev %>%
+  mutate(
+    Call = as.numeric(sales_method == "Call"),
+    Email = as.numeric(sales_method == "Email"),
+    Email_and_Call = as.numeric(sales_method == "Email + Call")
+  )
+```
+
+```{r}
+#It was also necessary to normalize numerical variables
+product_salesDBnn <- product_salesDBnn %>%
+  mutate(
+    nb_sold_scaled = (nb_sold - min(product_salesDBnn$nb_sold, na.rm = TRUE)) / (max(product_salesDBnn$nb_sold, na.rm = TRUE) - min(product_salesDBnn$nb_sold, na.rm = TRUE)),
+    revenue_scaled = (revenue - min(product_salesDBnn$revenue, na.rm = TRUE)) / (max(product_salesDBnn$revenue, na.rm = TRUE) - min(product_salesDBnn$revenue, na.rm = TRUE))
+  )
+```
+
+#### To properly create and test the model, the data was randomly separated into two groups for training and testing.
+
+```{r}
+#Here we count how many rows there are
+product_salesComplRevCount <- product_salesComplRev %>%
+  summarize(total_rows = n())
+
+print(paste("There are a total of", product_salesComplRevCount$total_rows, "rows"))
+```
+
+```{r}
+#Separating the data into two groups for training and testing
+sample_sales = sample(2,13926,replace=T, prob=c(0.7,0.3))
+train_data = product_salesDBnn[sample_sales==1,]
+test_data = product_salesDBnn[sample_sales==2,]
+```
+
+```{r}
+#Created the formula for the prediction
+formulann <- revenue_scaled ~ Call + Email + Email_and_Call + nb_sold_scaled
+```
+
+```{r}
+#Here is the creation of the neural network model, this code may take a while to load in workbook
+nn_model <- neuralnet(formulann, train_data, hidden=c(4,4))
+```
+
+#### After creating the predictive formula:
+revenue(scaled) ~ Call + Email + Email_and_Call + nb_sold(scaled)
+
+#### And creating a model based on the data separated for training, the next step is to calculate predictions based on the information on our test data and convert the resulting revenue predictions into denormalized values.
+
+```{r}
+#Here we calculate the predictions
+test_predictions <- neuralnet::compute(nn_model, test_data[, c("Call", "Email", "Email_and_Call", "nb_sold_scaled")])
+
+predicted_values <- test_predictions$net.result
+```
+
+```{r}
+#Converting the results back
+predicted_revenue <- predicted_values * (max(product_salesDBnn$revenue, na.rm = TRUE) - min(product_salesDBnn$revenue, na.rm = TRUE)) + min(product_salesDBnn$revenue, na.rm = TRUE)
+```
+
+#### After calculating the predictions, it is crucial to verify how accurate our model is with its predictions. From the results, its evident the model is returning very accurate estimates with no prediction over a difference of 10 dollars from the real value and 50% of predictions being within a range of less than 2 dollars from the real value, the model is definitely validated. We can notice this accuracy from the residual graph created below:
+
+```{r}
+#Analyzing the residuals to see the accuracy
+Residuals <- test_data$revenue - predicted_revenue
+summary(Residuals)
+plot(Residuals)
+```
+
+#### With the model being validated, it was possible to move on to the next step. The data without revenue values was converted for the neural network model predictions. A stronger model with all sales_method and nb_sold values that have revenue data was used for the final prediction and input of the missing revenue values into the final updated database that is now ready for analysis.
+
+```{r}
+#Filtering table without revenue values
+na_revenue_data <- product_sales %>%
+  filter(is.na(revenue))
+```
+
+```{r}
+#Converting the data for the model to predict
+na_revenue_data <- na_revenue_data %>%
+  mutate(nb_sold_scaled = (nb_sold - min(product_sales$nb_sold)) / (max(product_sales$nb_sold) - min(product_sales$nb_sold)))
+
+
+na_revenue_data <- na_revenue_data %>%
+  mutate(Call = ifelse(sales_method == "Call", 1, 0),
+         Email = ifelse(sales_method == "Email", 1, 0),
+         Email_Call = ifelse(sales_method == "Email + Call", 1, 0))
+```
+
+```{r}
+#Model including all the rows with revenue data for prediction, here it may take a while to load in the workbook as well
+nn_model_final <- neuralnet(formulann, product_salesDBnn, hidden=c(4,4))
+```
+
+```{r}
+#Calculating predictions for missing values
+predictions_na <- neuralnet::compute(nn_model_final, na_revenue_data[, c("Call", "Email", "Email_Call", "nb_sold_scaled")])
+```
+
+```{r}
+#Converting the data to denormalized numbers
+predicted_revenue_na <- predictions_na$net.result * 
+  (max(product_sales$revenue, na.rm = TRUE) - min(product_sales$revenue, na.rm = TRUE)) + 
+  min(product_sales$revenue, na.rm = TRUE)
+
+#Rounding predictions to second decimal
+predicted_revenue_na <- round(predicted_revenue_na, 2)
+```
+
+```{r}
+#Filling in the predictions to the NA revenue table
+product_sales_rev_pred <- na_revenue_data %>%
+  mutate(revenue = if_else(is.na(revenue), predicted_revenue_na, revenue))
+```
+
+```{r}
+#Combining the predictions table with the table that has all initial revenue values
+product_sales_final <- bind_rows(product_salesComplRev, product_sales_rev_pred)
+
+product_sales_final <- product_sales_final %>%
+  select(-nb_sold_scaled, -Call, -Email, -Email_Call)
+```
+
+#### The database is now completely "clean" and validated, we can now proceed to the exploratory analysis.
+
+```{r}
+#Data overview after adjustments
+print(summary(product_sales_final))
+```
+
+# 2. Exploratory Analysis
+Here we will analyze the characteristics of the variables, their relationships and any perceivable patterns within the data.
+
+#### Before answering the questions from the sales team, here are some characteristics of different variables within the given database
+
+#### First, a histogram of the total site visits each customer had. It shows a normal distribution that is centered on the mean of 24.99. It does not appear to have any significant correlation with other variables.
+
+```{r}
+#Histogram for nb_site_visits
+ggplot(product_sales_final, aes(nb_site_visits)) +
+geom_histogram(binwidth = 1, color='black', fill = 'orange') +
+  labs(x='Site Visits', y='Count', title='Histogram for Site Visits') +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+#### This next histogram of the years_as_customer variable is right_skewed, with most of the customers being relatively new. It also seems to have no strong correlation with other variables.
+
+```{r}
+#Histogram for years_as_customer
+ggplot(product_sales_final, aes(years_as_customer)) +
+geom_histogram(binwidth = 2, color='black', fill = 'orange') +
+  labs(x='Years as Customer', y='Count', title='Histogram for Years as Customer') +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+#### Next is a bar graph showing who are the top 9 states with the most customers, the state column does not appear to have any strong correlation with other variables as well. They are mostly proportionately distributed by sales methods. For better understanding, the percentage of total customers in the US approached by the Email method is approximately 50%, so around 50% of total customers in each state will also be approached by the Email method. The main difference between states is the total amount of customers.
+
+```{r}
+#Bar graph of top 9 states with most customers
+state_distribution <- product_sales_final %>%
+  group_by(state) %>%
+  summarize(customer_count = n()) %>%
+  slice_max(order_by = customer_count, n = 9)
+
+ggplot(state_distribution, aes(x= reorder(state, -customer_count), y=customer_count, fill = state)) +
+  geom_col(color='black') +
+  scale_fill_brewer(palette = "Set1") +
+  geom_text(aes(label = comma(customer_count)), position = position_stack(vjust=1.1), color = "black") +
+  labs(x= 'State', y= 'Customer Count', title = 'Total Customers per State') +
+scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "none")
+```
+
+#### Now, to answer the first question from the sales team:
+#### How many customers were there for each approach? 
+#### A bar graph was created showing how many customers there were for each method.
+- 49.77% of total customers were contacted by the Email method, a count of 7,466 customers
+- 33.08% of total customers were contacted by the Call method, a count of 4,962 customers
+- 17.15% of total customers were contacted by the Email + Call method, a count of 2,572 customers
+
+```{r}
+#Bar graph for customer count and percentage
+total_customer_per_method <- product_sales_final %>%
+  group_by(sales_method) %>%
+  summarize(total_customers = n()) %>%
+  mutate(customer_percentage = (total_customers / sum(total_customers))*100)
+
+ggplot(total_customer_per_method, aes(x= sales_method, y=customer_percentage, fill = sales_method)) +
+  geom_col(color='black') +
+  geom_text(aes(label = comma(total_customers)), position = position_stack(vjust=0.9), color = "white") +
+  labs(x = 'Customers per Sales Method', y = 'Customer Percentage (%)', fill = 'Legend', title = 'Customer Count and Percentage per Sales Method') +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_bw() +
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+#Checking exact percentages
+print(total_customer_per_method$customer_percentage)
+```
+
+#### The next graph below shows which method made the most total revenue as well. The method that made the most money with the data gathered was the Email method with a total of 725,580.10 dollars (50.53%), followed by the Email + Call method with 473,856.35 dollars (33%) and finally the Call method with 236,393.28 dollars (16.47%). We will see in the next graphs that the larger revenue for the Email method is largely due to the larger number of customers in it and the Call method performed worse than Email + Call even with a larger customer count.
+
+```{r}
+#Bar plot for total revenue per sales method
+rev_per_method <- product_sales_final %>%
+  group_by(sales_method) %>%
+  summarize(total_rev = sum(revenue)) %>%
+  mutate(rev_perc = (total_rev / sum(total_rev))*100)
+
+ggplot(rev_per_method, aes(x= sales_method, y=rev_perc, fill = sales_method)) +
+  geom_col(color = 'black') +
+  geom_text(aes(label = comma(total_rev, accuracy = 0.01)), position = position_stack(vjust=0.9), color = "white") +
+  labs(x = 'Total Revenue per Sales Method', y = 'Total Revenue Overall Percentage (%)', fill = 'Legend', title = 'Total Revenue and Percentage per Sales Method') +
+scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+#### Next we will answer the second question, 
+#### What does the spread of revenue look like overall and for each method?
+#### It is important to remind that 50% of data is between Q1 and Q3, split 25% between the median and Q1 and 25% between the median and Q3. The interquartile range or IQR is the name for the range between Q1 and Q3 and displayed by the boxes in the boxplot. The lines from the box show the range of data points that are not outliers and the dots represent outliers which is data that falls significantly outside the range.
+
+#### First with the overall revenue: 
+
+```{r}
+#Checking overall descriptive stats
+overall_revenue_stats <- product_sales_final %>%
+  summarize(
+    median_revenue = median(revenue, na.rm = TRUE),
+    Q1 = quantile(revenue, 0.25, na.rm = TRUE),
+    Q3 = quantile(revenue, 0.75, na.rm = TRUE),
+    IQR_revenue = IQR(revenue, na.rm = TRUE),
+    outliers_count = sum(revenue > (Q3 + 1.5 * IQR_revenue) | revenue < (Q1 - 1.5 * IQR_revenue), na.rm = TRUE),
+	  max_rev = max(revenue),
+	  min_rev = min(revenue),
+	  range = max(revenue) - min(revenue)
+  )
+
+print(overall_revenue_stats)
+```
+
+```{r}
+#Dotplot to see distribution of revenue
+ggplot(product_sales_final, aes('',revenue)) +
+geom_boxplot(width = 0.1, outlier.shape = NA) +
+  geom_jitter(data = product_sales_final %>%
+                 filter(revenue > (quantile(revenue, 0.75) + 1.5 * IQR(revenue))), width = 0.15, size = 1, alpha= 0.4) +
+theme_classic() +
+theme(plot.margin = unit(c(1, 3, 1, 1), "cm"), panel.grid.major.y = element_line(color = 'grey90'), plot.title = element_text(hjust = 0.5)) +
+  labs(x='',y='Revenue',title = "Revenue Distribution")
+```
+
+- Median: 90
+- Q1: 52.76
+- Q3: 108.63 
+- Max: 238.32
+- Min: 32.54
+- IQR: 55.87
+- Range: 205.78
+- Total outliers: 617
+
+#### The overall revenue spread has a very large range of 205.78 from the lowest value of 32.54 to the highest value of 238.32 but 50% of the data is concentrated between 52.76 and 108.63 with a IQR the size of 55.87 dollars. There is a total of 617 outliers, many of them around close values, indicating a smaller group that significantly spends more money than most. Also, the median is 90, this means half the values are above 90 and half are below.
+
+#### For the spread of revenue for each sales method:
+
+```{r}
+#Checking descriptive stats for each method
+sales_method_rev_stats <- product_sales_final %>%
+  group_by(sales_method) %>%
+  summarize(
+    median_revenue = median(revenue, na.rm = TRUE),
+    q1 = quantile(revenue, 0.25, na.rm = TRUE),
+    q3 = quantile(revenue, 0.75, na.rm = TRUE),
+    iqr = IQR(revenue, na.rm = TRUE),
+    total_outliers = sum(revenue < (q1 - 1.5 * iqr) | revenue > (q3 + 1.5 * iqr)),
+	  max_rev = max(revenue),
+	  min_rev = min(revenue),
+	  range = max(revenue) - min(revenue)
+  )
+
+print(sales_method_rev_stats)
+print(sales_method_rev_stats$range)
+```
+
+```{r}
+#Dotplot to see distribution of revenue per sales_method
+ggplot(product_sales_final, aes(sales_method,revenue)) +
+geom_boxplot(width = 0.3, outlier.shape = NA) +
+  geom_jitter(data = product_sales_final %>%
+                 group_by(sales_method) %>%
+                 filter(revenue > (quantile(revenue, 0.75) + 1.5 * IQR(revenue))), 
+               width = 0.15, size = 1, alpha = 0.4) +
+theme_classic() +
+theme(plot.margin = unit(c(1, 1, 1, 1), "cm"), panel.grid.major.y = element_line(color = 'grey90'), plot.title = element_text(hjust = 0.5)) +
+labs(x='Sales Method',y='Revenue',title = "Revenue Distribution per Sales Method")
+```
+
+#### Call method:
+- Median: 49.265
+- Q1: 41.46
+- Q3: 52.7
+- Max: 71.36
+- Min: 32.54
+- IQR: 11.24
+- Range: 38.82
+- Total outliers: 14
+
+#### Email method:
+- Median: 95.79
+- Q1: 88.1525
+- Q3: 105.2975
+- Max: 148.97
+- Min: 78.83
+- IQR: 17.145
+- Range: 70.14
+- Total outliers: 88
+
+#### Email + Call method:
+- Median: 184.5
+- Q1: 156.0275
+- Q3: 191.275
+- Max: 238.32
+- Min: 122.11
+- IQR: 35.2475
+- Range: 116.21
+- Total outliers: 0
+
+#### The Call method has the shortest range (38.82) and the lowest overall values between all methods, with a maximum of 71.36 and a minimum of 32.54. It also has the smallest IQR of 11.24 with its Q1 at 41.46, Q3 at 52.7 and a median of 49.265. It has the second most outliers with 14. The range of the call method does not overlap with any of the others.
+#### The Email method has the second smallest range of 70.14 with a maximum of 148.97 and a minimum of 78.83. The second smallest IQR is also from the Email method at 17.145 with the Q1 at 88.1525, Q3 at 105.2975 and median of 95.79. It is the method with the most outliers with 88 and its range overlaps with the Email + Call method, it also has the second smallest values overall.
+#### The Email + Call method has the largest range of 116.21 with the maximum value being 238.32 and the minimum being 122.11. It has the largest IQR as well of 35.2475, significantly bigger than the other methods IQRs. The Q1 is 156.0275, Q3 is 191.275 and median is 184.5. It is the only method that does not have any outliers and its range overlaps with the Email method. It has the highest overall revenue values as well.
+
+#### The third question:
+#### Was there any difference in revenue over time for each method?
+#### This question can be answered by analyzing the graph below. All methods show a very similar, almost identical, trend throughout all weeks, although with significantly different values. They all increase from week 1 to week 2, decrease from week 2 to week 3 and then go on a very alike increasing pattern to the end with similar percentages of increase and decrease throughout each method. Email + Call has the highest average revenue throughout the whole 6 week period, the second highest average revenue through the whole period is the Email method and the lowest average revenue for the whole period is the Call method. 
+
+```{r}
+#Line plot of average revenue over time (in weeks) grouped by sales method
+product_sales_avg_rev_method <- product_sales_final %>%
+  group_by(week, sales_method) %>%
+  summarize(avg_revenue = mean(revenue), .groups = "drop")
+
+ggplot(product_sales_avg_rev_method, aes(week,avg_revenue, color=sales_method)) +
+  geom_line(linewidth=0.7) +
+  geom_point(color = 'black', size = 0.6, alpha = 0.8) +
+  labs(x = 'Week', y = 'Average Revenue ($)', title = 'Average Revenue Through Time') +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+#### However, it is important to note that the revenue increase trend over time is almost identical to the products sold (nb_sold) increase over time as seen in the graph below. This means the increase in revenue over time is not only because of the passage of time, it is probably mostly related to the increase in products sold. This note also helps to answer the fourth question:
+#### Are there any differences between the customers in each group?
+#### The most significant differences between the customers in each method is how Email + Call customers buy more products and spend more money compared to the others, followed by the Email method and lastly the Call method.
+
+```{r}
+#Line plot of average nb_sold over time (in weeks) grouped by sales method
+product_sales_avg_sold_method <- product_sales_final %>%
+  group_by(week, sales_method) %>%
+  summarize(avg_nb_sold = mean(nb_sold), .groups = "drop")
+
+ggplot(product_sales_avg_sold_method, aes(week,avg_nb_sold, color=sales_method)) +
+  geom_line(size=0.7) +
+  geom_point(color = 'black', size = 0.6, alpha = 0.8) +
+  labs(x = 'Week', y = 'Average Products Sold', title = 'Average Products Sold Through Time') +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+#### Below we can observe that the overall trend (all methods) for average revenue over time and average products sold over time are extremely similar as well.
+
+```{r}
+#Line plot of average revenue over time (in weeks)
+product_sales_avg_rev_week <- product_sales_final %>%
+  group_by(week) %>%
+  summarize(avg_revenue = mean(revenue))
+
+ggplot(product_sales_avg_rev_week, aes(week,avg_revenue)) +
+  geom_line(color = 'blue') +
+  geom_point(color = 'blue') +
+  geom_area(fill = "lightblue", alpha = 0.5) +
+  geom_text(aes(label = comma(avg_revenue)), position = position_stack(vjust=1.1), color = "black", size=3) +
+  labs(x = 'Week', y = 'Average Revenue ($)', title = 'Average Revenue Through Time') +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+#Line plot of average nb_sold over time (in weeks)
+product_sales_avg_sold_week <- product_sales_final %>%
+  group_by(week) %>%
+  summarize(avg_nb_sold = mean(nb_sold))
+
+ggplot(product_sales_avg_sold_week, aes(week,avg_nb_sold)) +
+  geom_line(color = 'blue') +
+  geom_point(color = 'blue') +
+  geom_area(fill = "lightblue", alpha = 0.5) +
+  geom_text(aes(label = comma(avg_nb_sold)), position = position_stack(vjust=1.1), color = "black", size=3) +
+  labs(x = 'Week', y = 'Average Products Sold', title = 'Average Products Sold Through Time') +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+#Linear regression model showing variables with most influence over revenue
+lr_model = lm(revenue ~ week + nb_sold + sales_method + state + years_as_customer + nb_site_visits, product_sales_final)
+
+lr_model
+```
+
+#### So the main difference in revenue over time for each method is that Email + Call makes the most money, than Email second and Call last. All methods share a very similar trend through time, but that happens more likely because the products sold (nb_sold) variable has almost the same trend through time as well. This is also further proven by the coefficient values of a linear regression model tested for revenue with all other variables. The variable with the largest coefficient value after the sales methods is the nb_sold variable by far, with a much more significant value of 8.71 compared to the lower value of 0.33 from the week variable.
+
+#### All of this leads to the graph showed in the first section, which was used as the basis to predict revenue.
+
+```{r}
+#Dot plot of revenue by products sold colored by sales method
+ggplot(product_sales_final, aes(x= nb_sold, y= revenue, color=sales_method)) +
+  geom_point() +
+  geom_jitter(alpha = 0.3) +
+  labs(y= 'Revenue ($)', x= 'Products Sold', title = 'Revenue by Products Sold Colored by Sales Method', color = 'Sales Method') +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+#### This graph above shows a very clear correlation between revenue, products sold and sales method, there is a increasing trend for each of the methods but with different values. The visualization shows that there is a well defined range for where the data point will fall into the graph given its variables values. Given two variable values, a great prediction can be made for the third with this dot plot. It also shows that although revenue does increase with more products sold, customers spend more money with different methods even if they buy the same amount of products. There could be several reasons for this happening, here are a couple speculations. 
+- The Email + Call method provided customers with more information on all products and may have shown why the expensive items are worth the money
+- The Email + Call method focused or was more convincing on selling different items than the other methods that happen to be more expensive
+- The selection of sales method on each customer may not have been completely random and the Email + Call method may have been mistakenly selected to target customers that have higher incomes or spend more
+- Price fluctuations by the week may have impacted on how much money was spent on each method as well since each method had different products sold averages each week. We can see in the same graph below but colored by week that there are different shades (weeks) in the same products sold number and they mostly change on the different sales methods positions seen on the previous graph
+
+```{r}
+#Dotplot colored by week
+ggplot(product_sales_final, aes(x= nb_sold, y= revenue, color=week)) +
+  geom_point() +
+  geom_jitter(alpha = 0.3) +
+  labs(y= 'Revenue ($)', x= 'Products Sold', title = 'Revenue by Products Sold Colored by Sales Method', color = 'Week') +
+scale_color_gradient(low = "lightblue", high = "red") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+#### This graph also shows that another difference between customers from different sales methods is that they tend to buy certain amounts of products in different weeks (ex: some Call method customers bought 8 products after week 2 while Email and Email + Call customers only bought 8 products in week 1 or 2), adding to the fourth questions answer.
+#### With the main characteristics and most important correlations of the variables detected and analyzed, the last question can now be tackled in the last section.
+
+# 3. Creating the Metric
+Here we will create a metric that can tell us the best method to use taking into consideration the revenue gained and the effort put into each method. This will also answer the fifth and final question:
+- Based on the data, what method would be recommended to use considering the effort for each?
+
+#### First, a table was created to calculate the average revenue per customer for each method so that the total number of customers does not affect the metric.
+
+```{r}
+#Calculating average revenue per customer grouped by sales method
+avg_rev_per_cust <- product_sales_final %>%
+  group_by(sales_method) %>%
+  summarize(total_rev_method = sum(revenue),
+            customer_count = n(),
+            rev_per_cust = total_rev_method/customer_count)
+
+avg_rev_per_cust
+```
+
+#### Next, a direct comparison of the average revenue per customer will be made in between all the three methods to calculate the percentage difference of revenue that can be attained. To take into consideration if the effort is worth the revenue difference, a threshold was established for each comparison.
+
+- When comparing "Email + Call" (10min/customer) with "Email" (very little work overall), considering a small 10min difference between methods, the threshold to choose the "Email + Call" method was decided to be at least making 10% more revenue than the "Email" method, a significant amount of extra revenue.
+- When comparing "Email + Call" (10min/customer) with "Call" (30min/customer), there is a more significant 20 min difference, so the threshold decided had to be a larger 15% more revenue from the "Call" method for "Call" to be selected over "Email + Call".
+- When comparing "Call" (30min/customer) with "Email" (very little work overall), there is a larger 30 min difference so the proportional threshold (considering the other thresholds) for it will be if "Call" makes 20% more revenue, it may be selected over "Email"
+
+#### In these three comparisons, there will always be one method that "wins" twice which will be the chosen method
+
+```{r}
+#Creating the comparisons
+print('Below are the results of the three comparisons:')
+
+print('Comparison 1: Email + Call / Email')
+emailcall_x_email = avg_rev_per_cust$rev_per_cust[avg_rev_per_cust$sales_method == 'Email + Call']/avg_rev_per_cust$rev_per_cust[avg_rev_per_cust$sales_method == 'Email']
+emailcall_x_email #If over 1.1 EMAILCALL
+
+print('Comparison 2: Call / Email + Call')
+call_x_emailcall = avg_rev_per_cust$rev_per_cust[avg_rev_per_cust$sales_method == 'Call']/avg_rev_per_cust$rev_per_cust[avg_rev_per_cust$sales_method == 'Email + Call']
+call_x_emailcall #If over 1.15 CALL
+
+print('Comparison 3: Call / Email')
+call_x_email = avg_rev_per_cust$rev_per_cust[avg_rev_per_cust$sales_method == 'Call']/avg_rev_per_cust$rev_per_cust[avg_rev_per_cust$sales_method == 'Email']
+call_x_email #If over 1.2 CALL
+```
+
+#### To count the wins for each method, a win count table was created determining each "winner" based on the selected thresholds.
+
+```{r}
+#Creating a win count table
+win_counts <- data.frame(
+  Method = c("Email", "Email + Call", "Call"),
+  Wins = c(0, 0, 0)
+)
+```
+
+```{r}
+#Determining the winner for each comparison result
+if (emailcall_x_email > 1.1) {
+  win_counts$Wins[win_counts$Method == "Email + Call"] <- win_counts$Wins[win_counts$Method == "Email + Call"] + 1
+} else {
+  win_counts$Wins[win_counts$Method == "Email"] <- win_counts$Wins[win_counts$Method == "Email"] + 1
+}
+
+if (call_x_emailcall > 1.15) {
+  win_counts$Wins[win_counts$Method == "Call"] <- win_counts$Wins[win_counts$Method == "Call"] + 1
+} else {
+  win_counts$Wins[win_counts$Method == "Email + Call"] <- win_counts$Wins[win_counts$Method == "Email + Call"] + 1
+}
+
+if (call_x_email > 1.2) {
+  win_counts$Wins[win_counts$Method == "Call"] <- win_counts$Wins[win_counts$Method == "Call"] + 1
+} else {
+  win_counts$Wins[win_counts$Method == "Email"] <- win_counts$Wins[win_counts$Method == "Email"] + 1
+}
+```
+
+```{r}
+#Displaying the best method based on the comparisons (2 "wins")
+winning_method <- win_counts$Method[win_counts$Wins == 2]
+
+print('With the current data, the most recommended method for use is:')
+winning_method
+```
+
+#### Given the database provided, the best method to continue using is the "Email + Call" method. It not only has a significant higher average revenue per customer, it also wins the comparisons when taking effort into account. Looking at the comparison results we can see the "Email + Call" total revenue will make almost 4 times more than the "Call" method and 89% more than the "Email" method making it definitely worth the effort. This metric can be repeatedly calculated as more data is added to the database, it would be good to monitor the metrics result every 4-6 weeks to check the best method for use. It could also be used after a period in which changes in the methods implementations were made to check its effects.
+
+# Report Summary
+
+#### 1. Data Validation and Cleaning
+All columns from the database were analyzed and reviewed to verify their validity. Out of all the 8 variables, 5 of them were determined to be valid just the way they were received from the database: nb_sold, customer_id, week, state and nb_site_visits. It was also identified that 3 of them were in need of adjusting: sales_method, years_as_customer and revenue. First, sales_method only needed a label naming correction, changing wrongly written labels to their respective correct label. The years_as_customer variable had values greater than the maximum possible, they were converted to the maximum value possible. The revenue variable had missing values, so a clear relationship between revenue, sales_method and nb_sold was identified and used to create a predicting model for revenue. This validated predicting model filled the empty revenue data based on the correlations with the other present variables.
+
+#### 2. Exploratory Analysis
+This section explored the main characteristics of the data and the most relevant correlations between them. It was noted that the nb_site_visits, state and years_as_customer variables did not have a important or significant correlation with any other variable. The most used method was "Email" for approximately 50% of total customers, the second most used was "Call" for around 33% of total customers and the least used was "Email + Call" for close to 17% of customers. The Email method made the most revenue overall, then Email + Call and then Call but this happened because Email has the most customers, Email + Call has the highest average revenue per customer. The overall revenue spread has a large range of 205.78 but 50% of the revenue spent per customer is within a smaller IQR range of 55.87 and the median is 90. When comparing the revenue spread per sales method, the Email + Call method has the largest range, IQR, median and overall values around a median of 184.5, followed next by the Email method with the second smallest range, IQR and overall values with a median of 95.79 and the Call method last with the smallest range, IQR, overall values and median of 49.265. There is a overall increasing trend of revenue over time across all methods but it is most likely because there is a very similar increasing trend for products sold across all methods as well and not because of the week variable. This is further supported by a linear regression model. Lastly, there is a very strong correlation between revenue, products sold (nb_sold) and sales method. There is a constant increase in revenue as products sold increases but the highest values for revenue consistently come from the "Email + Call" method, followed by "Email" and then "Call".
+
+#### 3. Creating a Metric
+To determine which is the best method to use, a comparison metric was developed. First, the average revenue per customer was calculated for each method, 47.64 for Call, 97.18 for Email and 184.24 for Email + Call. They were then each one compared to the other individually by dividing one value over the other. To consider the different efforts put into each method, different thresholds were established to decide a "winner" for each comparison (ex: result needs to be over 1.1 for method X to "win"). Whichever method "wins" twice within the three comparisons will be considered the best method to use since it will make the most revenue considering the effort taken for the method. With the current data, for the first and second comparison, "Email + Call" won. In the third comparison, "Email" won. Since "Email + Call" won twice, it is the most recommended method for continued implementation. This metric can be repeatedly calculated with more data.
+
+#### Final Recommendations
+My first recommendation is for the sales team to fully investigate or review the differences in the application of each method. A survey for customers about their understanding of the products and purchase could be useful to comprehend the different effects of each method. These would be the first steps to discovering what about the nature of the methods or how they were applied that resulted in such diverse results.
+
+There are a couple of possibilites regarding the final metric created. If the primary focus is to make more revenue, considering effort, than it is definitely recommended to continue using only the Email + Call method as it was the winner by far with the current data. However, if the main focus is to understand the success of the Email + Call method, then it would be great to create a survey, continue using all methods and gather more data for a future deeper analysis of the results.
+
+I believe it would be most wise to first continue using only the most effective method and try to understand its success reviewing information with the employees that implemented all the methods. In case this study with employees does not bear fruit for understanding, then choose which of the above possibilities to take, taking into consideration the main focus.
+
